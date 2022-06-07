@@ -36,7 +36,7 @@ ByteCodeHex(substr(bytecode, 2, strlen(bytecode))):-
   .decl Statement_Opcode(statement: Statement, opcode: Opcode)
   .decl Statement_Next(statement: Statement, statementNext: Statement)
 
-
+  // 各种opcode的声明
   #include "decompiler_input_statements.dl"
 
       
@@ -47,6 +47,9 @@ ByteCodeHex(substr(bytecode, 2, strlen(bytecode))):-
   // Similarly, instructions can disappear from the output (e.g., a JUMP
   // may become a PRIVATECALL) but this is a property of an instance, not
   // the entire JUMP opcode.
+
+  // 原opcode需要转化为三地址码TAC
+  // TACNOP是空指令，用于对齐
   .decl TACNOP(statement: Statement)
   
   TACNOP(stmt) :-
@@ -522,6 +525,7 @@ ByteCodeHex(substr(bytecode, 2, strlen(bytecode))):-
     ImmediateBlockJumpTarget(block, _).
 }
 
+// 转化为三地址码前的分析
 .comp PreTransLocalAnalysis : LocalAnalysis {
 
   .decl CODECOPYSmallConst(codeCopy:Statement, const:symbol)
