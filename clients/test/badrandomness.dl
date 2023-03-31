@@ -1,0 +1,150 @@
+#include "../clientlib/decompiler_imports.dl"
+#include "../clientlib/loops_semantics.dl"
+#include "../clientlib/guards.dl"
+#include "../clientlib/vulnerability_macros.dl"
+
+.decl PubFunArg(pubFunSign:symbol, argIndex:number, arg: Variable)
+.output PubFunArg
+PubFunArg(pubFunSign, argIndex, arg) :-
+    PublicFunctionSelector(pubFun, pubFunSign),
+    PublicFunctionArg(pubFun, arg, argIndex).
+
+.decl InPublicFunction(stmt:Statement, funSign:symbol)
+.output InPublicFunction
+InPublicFunction(stmt, funSign) :-
+    PublicFunctionSelector(fun, funSign),
+    Statement_Block(stmt, block),
+    InFunction(block, fun).
+
+// random number calculation using env opcode
+.decl EnvOp(stmt:Statement, to:Variable)
+.output EnvOp
+EnvOp(stmt, to) :-
+   TIMESTAMP(stmt, to);NUMBER(stmt, to);DIFFICULTY(stmt, to);COINBASE(stmt, to).
+
+// use random
+.decl RandomFlows(stmt: Statement, random: Variable)
+.output RandomFlows
+RandomFlows(stmt,random) :-
+   EnvOp(stmt, to),
+   Statement_Uses(useStmt, to, _),
+   Statement_Defines(useStmt, tar, _),
+   DataFlows(tar, random).
+
+// loop time depends on arg
+.decl ExternalControlledLoop(pubFunSign:symbol, argIndex:number, loop: Block)
+.output ExternalControlledLoop
+ExternalControlledLoop(pubFunSign, argIndex, loop) :-
+    // extract function stmts and arg index and arg
+    PubFunArg(pubFunSign, argIndex, arg),
+    // the exit condition of the loop (e.g., a < 1)
+    LoopExitCond(condVar, loop),
+    DataFlows(arg, condVar).
+
+// creation in the external controlled loop
+.decl ExternalControlledCreation(addr: Variable, storeKeyVar: Variable, loop: Block, argIndex:number)
+.output ExternalControlledCreation
+ExternalControlledCreation(addr, storeKeyVar, loop, argIndex) :-
+    // stmt is in the loop (while, for loop)
+    StatementInStructuredLoop(stmt, loop),
+    // create stmt and the defined the return var: addr
+    Statement_Opcode(stmt, "CREATE"),
+    Statement_Defines(stmt, addr, _),
+
+    // addr flows to other vars related to storage operation
+    DataFlows(addr, storeKeyVar),
+    SSTORE(_, _, storeKeyVar),
+    
+    ExternalControlledLoop(_, argIndex, loop).
+
+.decl CallAddressFromStorage(loadStmt:Statement, index:Variable, callStmt:Statement)
+// Call an address at callStmt that is loaded at loadStmt from storage      
+CallAddressFromStorage(loadStmt, index, callStmt) :-
+  SLOAD(loadStmt, index, resVar),
+  DataFlows(resVar, target),
+  CALL(callStmt, _, target, _, _, _, _, _, _).
+
+// call created contract to attack in a controlled loop
+.decl ExternalCallInControlledLoop(loop: Block, index:Variable)
+.output ExternalCallInControlledLoop
+ExternalCallInControlledLoop(loop,index) :-
+    InductionVariable(i, loop),
+    DataFlows(i, index),
+    CallAddressFromStorage(_, index, _).
+
+.decl BadRandomnessAttack(funSign:symbol, loop:Block)
+.output BadRandomnessAttack
+BadRandomnessAttack(funSign, loop) :-
+    InFunction(loop, fun),
+    PublicFunctionSelector(fun, funSign),
+    ExternalCallInControlledLoop(loop,_),
+    RandomFlows(rStmt, _),
+    InPublicFunction(rStmt, funSign),
+    // TODO the var to read address from and to store the created contracts'addresses should be the same
+    ExternalControlledCreation(_,_,_,_).
+
+.decl SelfDestructCaller(sdStmt:Statement, target:Variable)
+.output SelfDestructCaller
+SelfDestructCaller(sdStmt,target) :-
+    CALLER(_, caller),
+    DataFlows(caller, target),
+    SELFDESTRUCT(sdStmt, target).
+
+
+.decl SelfDestructInConstructor(fun:Function, victim:Value, attacker:Variable)
+.output SelfDestructInConstructor
+SelfDestructInConstructor(fun, victim, attacker) :-
+    InFunction(loop, fun),
+    StatementInStructuredLoop(callStmt, loop),
+    CALL(callStmt, _, target, _, _, _, _, _, _),
+
+    // constant address to call
+    Variable_Value(target, victim),
+
+    SelfDestructCaller(sdStmt, attacker),
+    Statement_Block(sdStmt, block),
+    // !DiceToWin selfdestruct in the constructor
+    InFunction(block, fun).
+
+
+.decl CallResToCheck(funcSign:symbol, callStmt:Statement)
+.output CallResToCheck
+CallResToCheck(funcSign, callStmt) :-
+    CallResult(res, callStmt),
+    DataFlows(res, resCon),
+    ControlsWith(stmt,block,resCon),
+    (CALLER(sourceStmt, tar);ADDRESS(sourceStmt, tar);ORIGIN(sourceStmt, tar)),
+    Statement_Opcode(sourceStmt, sourceOp),
+    DataFlows(tar, source),
+    BALANCE(stmt, source, var),
+    (Leslie_CompareVars(var, _, _);Leslie_CompareVars(_, var, _)),
+    FLA_Statement_Function(stmt, func),
+    FLA_Statement_Function(sourceStmt, func),
+    FLA_Statement_Function(callStmt, func),
+    FLA_FunctionSelector(func, funcSign).
+
+.decl FLA_Statement_Function(stmt:Statement, func:Function)
+FLA_Statement_Function(stmt, func) :-
+  Statement_Function(stmt, func).
+
+FLA_Statement_Function(stmt, caller) :-
+  InFunction(block, caller),
+  CallGraphEdge(block, callee),
+  FLA_Statement_Function(stmt, callee).
+
+.decl Leslie_CompareVars(a: Variable, b: Variable, res: Variable)
+Leslie_CompareVars(a, b, res) :-
+  LT(_, a, b, res);LT(_, b, a, res);
+  GT(_, a, b, res);LT(_, b, a, res);
+  SLT(_, a, b, res);LT(_, b, a, res);
+  SGT(_, a, b, res);LT(_, b, a, res).
+
+// the entrance of the detection is either public function or the constructor (for createbin)
+.decl FLA_FunctionSelector(func: Function, funcSign: symbol)
+.output FLA_FunctionSelector
+FLA_FunctionSelector(func, funcSign) :-
+  PublicFunctionSelector(func, funcSign).
+
+FLA_FunctionSelector(func, funcSign) :-
+  HighLevelFunctionName(func, funcSign),
+  funcSign = "__function_selector__".

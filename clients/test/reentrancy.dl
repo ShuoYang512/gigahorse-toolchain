@@ -1,0 +1,313 @@
+#include "../clientlib/decompiler_imports.dl"
+#include "../clientlib/loops_semantics.dl"
+#include "../clientlib/guards.dl"
+#include "../clientlib/vulnerability_macros.dl"
+
+.decl InPublicFunction(stmt:Statement, funSign:symbol)
+InPublicFunction(stmt, funSign) :-
+    PublicFunctionSelector(fun, funSign),
+    Statement_Block(stmt, block),
+    InFunction(block, fun).
+
+.decl CallAddressFromStorage(loadStmt:Statement, index:Variable, callStmt:Statement)
+// Call an address at callStmt that is loaded at loadStmt from storage      
+CallAddressFromStorage(loadStmt, index, callStmt) :-
+  SLOAD(loadStmt, index, resVar),
+  DataFlows(resVar, target),
+  CALL(callStmt, _, target, _, _, _, _, _, _).
+  
+// ! Loose logic for large scale search
+
+// 1. Fallback reentrancy (call.value())
+.decl ExternalCallInFallBack(name:symbol,target:symbol)
+.output ExternalCallInFallBack
+ExternalCallInFallBack(name,target) :-
+    Statement_Block(callStmt, block),
+    CallAddressFromStorage(_, _, callStmt),
+    InFunction(block ,func),
+    CALLWithPossibleSigHash(callStmt, target),
+    HighLevelFunctionName(func, name),
+    FallbackFunction(func).
+
+ExternalCallInFallBack(name,target) :-
+    Statement_Block(callStmt, block),
+    CallAddressFromStorage(_, _, callStmt),
+    InFunction(block ,tarFun),
+    CALLWithPossibleSigHash(callStmt, target),
+    HighLevelFunctionName(func, name),
+    CallGraphPath(func, tarFun),
+    FallbackFunction(func).
+
+// ExternalCallInFallBack(name,target) :-
+//     Statement_Block(callStmt, block),
+//     CallAddressFromStorage(_, _, callStmt),
+//     // InFunction(block ,tarFun),
+//     CALLWithPossibleSigHash(callStmt, target),
+//     HighLevelFunctionName(func, name),
+//     // CallGraphPath(func, tarFun),
+//     FallbackFunction(func),
+//     // !Exists: function selector (0x0) falls to fallback 
+//     // if fallback calls other function, the call stmt can be in the fallback or called function
+//     (InCallGraphPath(func, block, _, _);InCallGraphPath(func, _, _, block);
+//     InCallGraphPath("0x0", _, func, block)).
+
+// 2. ERChook-like reentrancy
+// get the name of the hook function and its selector hash
+.decl ERCHookReentrancy(sigHash:symbol, sigText:symbol, target:symbol)
+ERCHookReentrancy(sigHash,sigText, target) :-
+    // FunctionSignature
+    InPublicFunction(callStmt, sigHash),
+    // get the function hash and recovered name
+    PublicFunctionId(_, sigHash, sigText),
+    // TODO sigHash should be in the hook hash pool
+
+    // callStmt loaded from storage
+    CALLWithPossibleSigHash(callStmt, target),
+    CallAddressFromStorage(_, _, callStmt).
+
+ERCHookReentrancy(sigHash,sigText, target) :-
+    // callStmt loaded from storage
+    CALLWithPossibleSigHash(callStmt, target),
+    CallAddressFromStorage(_, _, callStmt),
+    Statement_Block(callStmt, block),
+    InFunction(block, fun),
+    CallGraphPath(pubFun, fun), IsPublicFunction(pubFun),
+    // TODO sigHash should be in the hook hash pool
+    PublicFunctionId(pubFun, sigHash, sigText).
+
+// ERCHookReentrancy(sigHash,sigText, target) :-
+//     // get the function hash and recovered name
+//     PublicFunctionId(func, sigHash, sigText),
+//     // TODO sigHash should be in the hook hash pool
+
+//     Statement_Block(callStmt, block),
+
+//     (InCallGraphPath(func, block, _, _);InCallGraphPath(func, _, _, block);
+//     InCallGraphPath("0x0", _, func, block)),
+//     // callStmt loaded from storage
+//     CALLWithPossibleSigHash(callStmt, target),
+//     CallAddressFromStorage(_, _, callStmt).
+
+.output ERCHookReentrancy
+
+
+// 3. DIY interface reentrancy
+// TODO hard to identify, should find some more features (e.g., caller restriction operation)
+.decl DIYInterfaceReetrancy(sigHash:symbol, sigText:symbol, target:symbol)
+.output DIYInterfaceReetrancy
+DIYInterfaceReetrancy(sigHash,sigText, target) :-
+    // FunctionSignature (not the ERC hook hash)
+    InPublicFunction(callStmt, sigHash),
+    // get the function hash and recovered name
+    PublicFunctionId(_, sigHash, sigText),
+    // callStmt loaded from storage
+    CALLWithPossibleSigHash(callStmt, target),
+    CallAddressFromStorage(_, _, callStmt).
+
+DIYInterfaceReetrancy(sigHash,sigText, target) :-
+    Statement_Block(callStmt, block),
+    InFunction(block, tarFun),
+    // find the other function the diy hook calls
+    CallGraphPath(diyFun, tarFun),
+    // FunctionSignature (not the ERC hook hash) 
+    // get the function hash and recovered name
+    PublicFunctionId(diyFun, sigHash, sigText),
+    // callStmt loaded from storage
+    CALLWithPossibleSigHash(callStmt, target),
+    CallAddressFromStorage(_, _, callStmt).
+
+// DIYInterfaceReetrancy(sigHash,sigText, target) :-
+//     // get the function hash and recovered name
+//     PublicFunctionId(func, sigHash, sigText),
+//     Statement_Block(callStmt, block),
+
+//     (InCallGraphPath(func, block, _, _);InCallGraphPath(func, _, _, block);
+//     InCallGraphPath("0x0", _, func, block)),
+//     // callStmt loaded from storage
+//     CALLWithPossibleSigHash(callStmt, target),
+//     CallAddressFromStorage(_, _, callStmt).
+
+// Indirect call model
+.decl CallGraphPath(fromFunc:Function, toFunc:Function)
+.output CallGraphPath
+CallGraphPath(fromFunc,toFunc):-
+    CallGraphEdge(block, toFunc),
+    InFunction(block, fromFunc).
+
+CallGraphPath(fromFunc,tarFunc):-
+    CallGraphEdge(block, toFunc),
+    CallGraphPath(toFunc,tarFunc),
+    InFunction(block, fromFunc).
+
+// .decl InCallGraphPath(fromFunc:Function, fromBlocks:Block, tarFunc:Function, tarBlocks:Block)
+// InCallGraphPath(fromFunc,fromBlocks,tarFunc,tarBlocks) :-
+//     CallGraphPath(fromFunc,tarFunc),
+//     InFunction(fromBlocks,fromFunc),
+//     InFunction(tarBlocks,tarFunc).
+// .output InCallGraphPath
+
+
+// !The following consider the prerequisite that two public function
+// !call the same external function, one is the hook function
+
+// the most straight way (no private function), two functions call the same, one is the hook
+.decl SameCallTargetInPubFuns(sigHash:symbol, pFun1:symbol, pFun2:symbol)
+.output SameCallTargetInPubFuns
+SameCallTargetInPubFuns(sigHash,pFun1,pFun2) :-
+    // call No.1
+    CallAddressFromStorage(_, _, callStmt1),
+    Statement_Block(callStmt1, block1),
+    InFunction(block1, pFun1),
+    CALLWithPossibleSigHash(callStmt1, sigHash),
+
+    // call No.2
+    CallAddressFromStorage(_, _, callStmt2),
+    Statement_Block(callStmt2, block2),
+    InFunction(block2, pFun2),
+    CALLWithPossibleSigHash(callStmt2, sigHash),
+
+    IsPublicFunction(pFun1),
+    (IsPublicFunction(pFun2);FallbackFunction(pFun2)),
+    // TODO one should be the hook
+    pFun1 != pFun2.
+    
+// ?Type1: two call to the same hash (hash occurs twice in different location)
+SameCallTargetInPubFuns(sigHash,pFun1,pFun2) :-
+    // call No.1
+    CallAddressFromStorage(_, _, callStmt1),
+    Statement_Block(callStmt1, block1),
+    InFunction(block1, fun1),
+    CALLWithPossibleSigHash(callStmt1, sigHash),
+
+    // call No.2
+    CallAddressFromStorage(_, _, callStmt2),
+    Statement_Block(callStmt2, block2),
+    InFunction(block2, fun2),
+    CALLWithPossibleSigHash(callStmt2, sigHash),
+
+    // pub fun call to private fun in call graph
+    CallGraphPath(pFun1, fun1),
+    CallGraphPath(pFun2, fun2),
+    IsPublicFunction(pFun1),
+    (IsPublicFunction(pFun2); FallbackFunction(pFun2)),
+    // TODO one should be the hook
+    pFun1 != pFun2.
+
+
+.decl CallToSameSigHash(sigHash:symbol, fun:Function)
+.output CallToSameSigHash
+// ?Type2: two call to same hash (hash occurs in one place)
+CallToSameSigHash(sigHash, fun) :-
+    Statement_Block(callStmt, block),
+    InFunction(block, fun),
+    CallAddressFromStorage(_, _, callStmt),
+    CALLWithPossibleSigHash(callStmt, sigHash),
+
+    CallGraphPath(pubFun1, fun),
+    CallGraphPath(pubFun2, fun),
+    IsPublicFunction(pubFun1),
+    (IsPublicFunction(pubFun2);FallbackFunction(pubFun2)),
+
+    // TODO one should be the hook
+    pubFun1 != pubFun2.
+
+// ?complex case if one public function calls another
+// ?like funciton a calls x(), function b intend to call x() by calling a, but this is rare
+
+// CallToSameSigHash(sigHash, fun) :-
+//     Statement_Block(callStmt, block),
+//     InFunction(block, fun),
+//     CallAddressFromStorage(_, _, callStmt),
+//     CALLWithPossibleSigHash(callStmt, sigHash),
+
+//     IsPublicFunction(fun),
+//     CallGraphPath(pubFun1, fun),
+//     (FallbackFunction(pubFun1);IsPublicFunction(pubFun1)),
+
+//     (CallGraphPath(pubFun1, fun);
+//      (IsPublicFunction(fun);
+//       FallbackFunction(pubFun1))),
+//     CallGraphPath(pubFun2, fun),
+//     (IsPublicFunction(pubFun1);FallbackFunction(pubFun1)),
+//     (IsPublicFunction(pubFun2);FallbackFunction(pubFun2)),
+
+//     // TODO one should be the hook
+//     pubFun1 != pubFun2.
+
+// ?Type3: less confidence, two call to different hash loaded from the same address
+// E.g. address.a(), address.b(), reentrancy type2, cross function reentrancy.
+
+
+
+// private function contains external call loaded from storage
+.decl ExternalCallInPrivateFun(fun: Function, sigHash: symbol)
+.output ExternalCallInPrivateFun
+ExternalCallInPrivateFun(fun, sigHash) :-
+    CALLWithPossibleSigHash(callStmt, sigHash),
+    InFunction(block, fun),
+    !IsPublicFunction(fun),
+    Statement_Block(callStmt, block),
+    CallAddressFromStorage(_,_,callStmt).
+
+
+// Strict case that require two different function invokes the same function, and one in the hook function
+// Occasion that external in a private funtion which is called by hook function
+// .decl MultipleCallToPrivateFun(fun:Function, sigHash:symbol)
+// .output MultipleCallToPrivateFun
+// MultipleCallToPrivateFun(fun, sigHash) :-
+//     // Internal function call
+//     CallGraphEdge(callBlock1, fun),
+//     CallGraphEdge(callBlock2, fun),
+
+//     InFunction(callBlock1, pFun1),
+//     InFunction(callBlock2, pFun2),
+//     IsPublicFunction(pFun1),
+//     IsPublicFunction(pFun2),
+//     // TODO one should be the hook
+//     pFun1 != pFun2,
+
+//     // private function call
+//     ExternalCallInPrivateFun(fun, sigHash).
+
+// .decl MultipleCallToSameSigHash(name:symbol, sigHash:symbol, fun:Function)
+// .output MultipleCallToSameSigHash
+// MultipleCallToSameSigHash(name, sigHash, fun) :-
+//     CallAddressFromStorage(_, _, callStmt),
+//     Statement_Block(callStmt, block),
+//     // call in a private function which called by a public function
+//     // in addition, the external called method can be called directly in a public function
+//     InFunction(block, fun),
+
+//     (IsPublicFunction(fun);
+//     (!IsPublicFunction(fun),
+//     CallGraphEdge(callBlock, fun),
+//     InFunction(callBlock, callFun),
+//     IsPublicFunction(callFun),
+//     fun != callFun)),
+
+//     CALLWithPossibleSigHash(acallStmt, sigHash),
+//     Statement_Block(acallStmt, ablock),
+//     CallAddressFromStorage(_,_,acallStmt),
+//     InFunction(ablock,anotherFun),
+//     IsPublicFunction(anotherFun),
+//     anotherFun != fun,
+    
+//     HighLevelFunctionName(fun, name),
+//     CallAddressFromStorage(_,_,callStmt),
+//     CALLWithPossibleSigHash(callStmt, sigHash).
+
+
+// CallToSameSigHash(sigHash, fun) :-
+//     // Internal function call
+//     CallGraphEdge(callBlock1, fun),
+//     InFunction(callBlock1, pFun1),
+//     IsPublicFunction(pFun1),
+
+//     CallAddressFromStorage(_, _, callStmt),
+//     CALLWithPossibleSigHash(callStmt, sigHash),
+//     InPublicFunction(callStmt, pFun2),
+//     // TODO one should be the hook
+//     pFun1 != pFun2,
+
+//     // private function call
+//     ExternalCallInPrivateFun(fun, sigHash).

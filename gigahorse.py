@@ -56,7 +56,7 @@ DEFAULT_CACHE_DIR = join(GIGAHORSE_DIR, 'cache')
 TEMP_WORKING_DIR = ".temp"
 """Scratch working directory."""
 
-DEFAULT_TIMEOUT = 120
+DEFAULT_TIMEOUT = 360
 """Default time before killing analysis of a contract."""
 
 DEFAULT_MINIMUM_CLIENT_TIME = 10

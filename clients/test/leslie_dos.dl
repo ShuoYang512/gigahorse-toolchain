@@ -1,0 +1,168 @@
+#include "../clientlib/decompiler_imports.dl"
+#include "../clientlib/loops_semantics.dl"
+#include "../clientlib/guards.dl"
+#include "../clientlib/vulnerability_macros.dl"
+
+.decl FLA_Statement_Function(stmt:Statement, func:Function)
+FLA_Statement_Function(stmt, func) :-
+  Statement_Function(stmt, func).
+
+FLA_Statement_Function(stmt, caller) :-
+  InFunction(block, caller),
+  CallGraphEdge(block, callee),
+  FLA_Statement_Function(stmt, callee).
+
+// random number calculation using env opcode
+// related to random number attack
+.decl EnvOp(stmt:Statement, to:Variable)
+EnvOp(stmt, to) :-
+   TIMESTAMP(stmt, to);NUMBER(stmt, to);DIFFICULTY(stmt, to);COINBASE(stmt, to).
+  
+// tainted vars
+// 1. tainted by envs
+.decl Leslie_TaintedVar(funcSign:symbol, var:Variable)
+.output Leslie_TaintedVar
+Leslie_TaintedVar(funcSign, var) :-
+  EnvOp(stmt, to),
+  DataFlows(to, var),
+  FLA_Statement_Function(stmt, func),
+  PublicFunctionSelector(func, funcSign).
+
+// 2. slots of profitable state vars related to callee address or transfer amount
+.decl Leslie_ProfitableVar(func:Function, callStmt:Statement, funcSign:symbol, slotNum:Value)
+.output Leslie_ProfitableVar
+Leslie_ProfitableVar(func,callStmt,funcSign,slotNum) :-
+  CALL(callStmt, _, _, amount, _, _, _, _, _),
+  SLOAD(stmt, slotNumVar, var),
+  DataFlows(var, amount),
+  Variable_Value(slotNumVar, slotNum),
+  FLA_Statement_Function(stmt, func),
+  PublicFunctionSelector(func, funcSign).
+
+Leslie_ProfitableVar(func,callStmt,funcSign,slotNum) :-
+  CALL(callStmt, _, calleeVar, _, _, _, _, _, _),
+  SLOAD(stmt, slotNumVar, var),
+  Variable_Value(slotNumVar, slotNum),
+  DataFlows(var, calleeVar),
+  FLA_Statement_Function(stmt, func),
+  PublicFunctionSelector(func, funcSign).
+
+// load slots of profitable state vars
+Leslie_TaintedVar(funcSign, var) :-
+  Leslie_ProfitableVar(_,_,_,slotNum),
+  SLOAD(stmt, slotNumVar, var),
+  Variable_Value(slotNumVar, slotNum),
+  FLA_Statement_Function(stmt, func),
+  PublicFunctionSelector(func, funcSign).
+
+// tainted data flow into storage
+.decl Leslie_TaintedSlot(slotNum:Value)
+Leslie_TaintedSlot(slotNum) :-
+  Leslie_TaintedVar(_, var1),
+  SSTORE(_, slotNumVar, var2),
+  Variable_Value(slotNumVar, slotNum),
+  DataFlows(var1, var2).
+
+Leslie_TaintedVar(funcSign, var) :-
+  Leslie_TaintedSlot(slotNum),
+  SLOAD(stmt, slotNumVar, var),
+  Variable_Value(slotNumVar, slotNum),
+  FLA_Statement_Function(stmt, func),
+  PublicFunctionSelector(func, funcSign).
+
+// callArgIndex = 1 means the 2nd parameter
+// 0,1....
+.decl Leslie_TaintedCallArg(funcSign:symbol, callStmt:Statement, callArgIndex:number)
+.output Leslie_TaintedCallArg
+Leslie_TaintedCallArg(funcSign, callStmt, callArgIndex-1) :-
+  (CALL(callStmt, _, _, _, _, _, _, _, _);STATICCALL(callStmt, _, _, _, _, _, _, _);DELEGATECALL(callStmt, _, _, _, _, _, _, _)),
+  StatementUsesMemory_ActualMemoryArg(callStmt, _, callArgIndex, callArg),
+  callArgIndex != 0,
+  Leslie_TaintedVar(_, var),
+  DataFlows(var, callArg),
+  Statement_Function(callStmt, func),
+  PublicFunctionSelector(func, funcSign).
+
+.decl Leslie_TaintedCallArg1(funcSign:symbol, callStmt:Statement, callArgIndex:number, var:Variable)
+.output Leslie_TaintedCallArg1
+Leslie_TaintedCallArg1(funcSign, callStmt, callArgIndex, var) :-
+  (CALL(callStmt, _, _, _, _, _, _, _, _);STATICCALL(callStmt, _, _, _, _, _, _, _);DELEGATECALL(callStmt, _, _, _, _, _, _, _)),
+  StatementUsesMemory_ActualMemoryArg(callStmt, _, callArgIndex, callArg),
+  callArgIndex != 0,
+//   Leslie_BR_TaintedVar(_, var),
+  DataFlows(var, callArg),
+  Statement_Function(callStmt, func),
+  PublicFunctionSelector(func, funcSign).
+
+// tainted data flow into func return value
+// .decl Leslie_TaintedFuncRet(funcSign:symbol, retIndex:number, ret:Variable)
+// .output Leslie_TaintedFuncRet
+// Leslie_TaintedFuncRet(funcSign, retIndex, ret) :-
+//   RETURN(retStmt, _, _),
+//   FLA_Statement_Function(retStmt, func),
+//   StatementUsesMemory_ActualMemoryArg(retStmt, _, retIndex, ret),
+//   Leslie_TaintedVar(_, var),
+//   DataFlows(var, ret),
+//   PublicFunctionSelector(func, funcSign).
+
+// data from external call return value directly flow into taint sink
+.decl Leslie_CallRetToSensitiveVar(funcSign:symbol, callStmt:Statement, callRetVar:Variable, callRetIndex:number, sensitiveVar:Variable)
+.output Leslie_CallRetToSensitiveVar
+Leslie_CallRetToSensitiveVar(funcSign, callStmt, callRetVar, callRetIndex, sensitiveVar) :-
+  ExternalCall_ActualReturn(callStmt, callRetVar, callRetIndex),
+//   FLA_SensitiveVar(_, sensitiveVar),
+  DataFlows(callRetVar, sensitiveVar),
+  FLA_Statement_Function(callStmt, func),
+  PublicFunctionSelector(func, funcSign).
+
+// we now only focus on the assertion case
+.decl Leslie_DoS_Op(funcSign:symbol,callRetIndex:number)
+.output Leslie_DoS_Op
+Leslie_DoS_Op(funcSign,callRetIndex) :-
+  // throw/revert
+  ThrowBlock(block),
+  Leslie_CallRetToSensitiveVar(funcSign,_,_,callRetIndex,var),
+  DataFlows(var, condVar),
+  // throw block should depend on the set var    
+  ControlsWith(_, block, condVar).
+
+// restore external call info
+.decl Leslie_ExternalCallInfo(func:Function, callStmt:Statement, callOp:Opcode, calleeVar:Variable, numArg:number, numRet:number)
+.output Leslie_ExternalCallInfo
+Leslie_ExternalCallInfo(func, callStmt, callOp, calleeVar, numArg, numRet) :-
+  PublicFunctionSelector(func, _),
+  FLA_Statement_Function(callStmt, func),
+  (CALL(callStmt, _, calleeVar, _, _, _, _, _, _);STATICCALL(callStmt, _, calleeVar, _, _, _, _, _);DELEGATECALL(callStmt, _, calleeVar, _, _, _, _, _)),
+  Statement_Opcode(callStmt, callOp),
+  ExternalCall_NumOfArgs(callStmt, numArg),
+  numRet = count: ExternalCall_ActualReturn(callStmt, _, _).
+
+// restore funcSign
+// call to const function 
+.decl Leslie_ExternalCall_FuncSign_ConstType(func:Function, callStmt:Statement, funcSign:Value)
+.output Leslie_ExternalCall_FuncSign_ConstType
+Leslie_ExternalCall_FuncSign_ConstType(func, callStmt, funcSign) :-
+  Leslie_ExternalCallInfo(func, callStmt, _, _, _, _),
+  Variable_Value(actual, funcSign),
+  StatementUsesMemory_ActualMemoryArg(callStmt, _, 0, actual).
+
+// restore callee
+.decl Leslie_ExternalCall_Callee_ConstType(func:Function, callStmt:Statement, callee:Value)
+.output Leslie_ExternalCall_Callee_ConstType
+Leslie_ExternalCall_Callee_ConstType(func, callStmt, callee) :-
+  Leslie_ExternalCallInfo(func, callStmt, _, calleeVar, _, _),
+  Variable_Value(calleeVar, callee).
+
+
+
+
+  
+.decl Leslie_TaintedFuncRet(funcSign:symbol, retIndex:number, ret:Variable)
+.output Leslie_TaintedFuncRet
+Leslie_TaintedFuncRet(funcSign, retIndex, ret) :-
+  RETURN(retStmt, _, _),
+  FLA_Statement_Function(retStmt, func),
+  StatementUsesMemory_ActualMemoryArg(retStmt, _, retIndex, ret),
+  Leslie_TaintedVar(_, var),
+  DataFlows(var, ret),
+  PublicFunctionSelector(func, funcSign).

@@ -1,0 +1,101 @@
+#include "../clientlib/decompiler_imports.dl"
+#include "../clientlib/loops_semantics.dl"
+#include "../clientlib/guards.dl"
+#include "../clientlib/vulnerability_macros.dl"
+
+.decl StatementInAccessibleFunction(s: Statement, f: Function)
+
+StatementInAccessibleFunction(s, f) :-
+   Statement_Block(s, b),
+   !StaticallyGuardedBlock(b, _),
+   InFunction(b, f).
+
+
+// increasing storage index and value while creating contract
+.decl IncreasedStorageOn(sstoreStmt: Statement, arrayId: Value)
+// When this public function is called, some array symbolized by arrayId is increased in size
+        
+IncreasedStorageOn(sstoreStmt, arrayId) :-
+   PossibleArraySizeVariable(sizeVar, arrayId),
+   AddResult(sizeVar, newSizeVar),
+   ADD(addStmt, _, _, newSizeVar),
+   StatementInAccessibleFunction(addStmt, f),
+   SSTORE(sstoreStmt, index, newSizeVar),
+   // not sure about the following, what if function calls private function?
+   StatementInAccessibleFunction(sstoreStmt, f), 
+   Variable_Value(index, arrayId).
+
+
+.decl ExternalControlledCreation(addr: Variable, storeVar: Variable, loop: Block)
+.output ExternalControlledCreation
+ExternalControlledCreation(addr, storeVar, loop) :-
+    // stmt is in the loop (while, for loop)
+    StatementInStructuredLoop(stmt, loop),
+    
+    // create stmt and the defined var: addr
+    Statement_Opcode(stmt, "CREATE"),
+    Statement_Defines(stmt, addr, _),
+
+    DataFlows(addr, storeVar).
+    // SSTORE(storeStmt, _, storeVar),
+    // IncreasedStorageOn(storeStmtOrig, arrayId),
+    // ArrayIdToStorageIndex(arrayId, storeOffsetVar),
+   
+.decl EnvOp(stmt:Statement, to:Variable)
+.output EnvOp
+EnvOp(stmt, to) :-
+   TIMESTAMP(stmt, to);NUMBER(stmt, to);DIFFICULTY(stmt, to);COINBASE(stmt, to).
+
+.decl LoopUsesRandom(stmt: Statement, tar: Variable, random: Variable)
+.output LoopUsesRandom
+LoopUsesRandom(stmt,tar,random) :-
+   // Statement_Block(stmt, loop),
+   EnvOp(stmt, to),
+   Statement_Uses(useStmt, to, _),
+   Statement_Defines(useStmt, tar, _),
+   // SHA3(sha3Stmt,_,_,_),
+   Statement_Uses(_, random, _),
+   DataFlows(tar, random).
+
+.decl LoopUsesRandom1(stmt: Statement, tar: Variable)
+.output LoopUsesRandom1
+LoopUsesRandom1(stmt,tar) :-
+   // Statement_Block(stmt, loop),
+   EnvOp(stmt, to),
+   Statement_Uses(useStmt, to, _),
+   Statement_Defines(useStmt, tar, _).
+   // SHA3(sha3Stmt,_,_,_),
+   // Statement_Uses(_, random, _),
+   // DataFlows(tar, random).
+
+.decl LoopUsesRandom2(stmt: Statement, tar: Variable, random: Variable, op: Opcode)
+.output LoopUsesRandom2
+LoopUsesRandom2(stmt,tar,random, op) :-
+   // Statement_Block(stmt, loop),
+   EnvOp(stmt, to),
+   Statement_Uses(useStmt, to, _),
+   Statement_Defines(useStmt, tar, _),
+   // SHA3(sha3Stmt,_,_,_),
+   Statement_Opcode(randUseStmt, op),
+   Statement_Uses(randUseStmt, random, _),
+   DataFlows(tar, random).
+
+.decl LoopUsesRandom3(stmt: Statement, random: Variable)
+.output LoopUsesRandom3
+LoopUsesRandom3(stmt,random) :-
+   // Statement_Block(stmt, loop),
+   EnvOp(stmt, to),
+   ConditionVar(random, conditionStmt),
+   // Statement_Uses(conditionStmt, random, _),
+   DataFlows(to, random).
+
+.decl LoopUsesRandom4(stmt: Statement, random: Variable)
+.output LoopUsesRandom4
+LoopUsesRandom4(stmt,random) :-
+   // Statement_Block(stmt, loop),
+   EnvOp(stmt, to),
+   Statement_Uses(useStmt, to, _),
+   Statement_Defines(useStmt, tar, _),
+   // SHA3(sha3Stmt,_,_,_),
+   ConditionVar(random, conditionStmt),
+   DataFlows(tar, random).

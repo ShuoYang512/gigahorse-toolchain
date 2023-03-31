@@ -1,0 +1,95 @@
+#include "../clientlib/decompiler_imports.dl"
+#include "../clientlib/loops_semantics.dl"
+#include "../clientlib/guards.dl"
+#include "../clientlib/vulnerability_macros.dl"
+
+.decl PubFunArg(pubFunSign:symbol, argIndex:number, arg: Variable)
+.output PubFunArg
+PubFunArg(pubFunSign, argIndex, arg) :-
+    PublicFunctionSelector(pubFun, pubFunSign),
+    PublicFunctionArg(pubFun, arg, argIndex).
+
+.decl InPublicFunction(stmt:Statement, funSign:symbol)
+.output InPublicFunction
+InPublicFunction(stmt, funSign) :-
+    PublicFunctionSelector(fun, funSign),
+    Statement_Block(stmt, block),
+    InFunction(block, fun).
+
+.decl CallAddressFromStorage(loadStmt:Statement, index:Variable, callStmt:Statement)
+// Call an address at callStmt that is loaded at loadStmt from storage      
+CallAddressFromStorage(loadStmt, index, callStmt) :-
+  SLOAD(loadStmt, index, resVar),
+  DataFlows(resVar, target),
+  CALL(callStmt, _, target, _, _, _, _, _, _).
+
+
+// REVERT with Assertion failed (set false manully)
+.decl REVERTControledWith(pubFunSign:symbol,block:Block, val:Value)
+.output REVERTControledWith
+REVERTControledWith(pubFunSign,block,val) :-
+    InFunction(block,fun),
+    PublicFunctionSelector(fun, pubFunSign),
+    // throw/revert
+    ThrowBlock(block),
+    // the condition should be manually set    
+    Variable_Value(condVar, val),
+    // throw block should depend on the set var    
+    ControlsWith(_, block, condVar).
+
+.decl DosAttack(pubFunSign:symbol,callStmt:Statement)
+.output DosAttack
+DosAttack(pubFunSign,callStmt) :-
+    InPublicFunction(callStmt,pubFunSign),
+    // REVERT with assertion failed: bool false
+    REVERTControledWith(pubFunSign, _, "0x0"),
+    ControlsWith(_, _, condVar),
+    // TODO condition flows to the revert block
+    DataFlows(resVar, condVar),
+    CallResult(resVar, callStmt).
+
+DosAttack(pubFunSign,callStmt) :-
+    InFunction(block,fun),
+    PublicFunctionSelector(fun, pubFunSign),
+
+    // the condition should be manually set    
+    (CallAddressFromStorage(_,_,callStmt);CALL(callStmt, _, _, _, _, _, _, _, _)),
+    
+    Statement_Block(callStmt, callBlock),
+    InFunction(callBlock,fun),
+    
+    // TODO the call res should flows to the assert condition
+    // CallResult(callRes, callStmt),
+    // DataFlows(callRes, condVar),
+
+    Variable_Value(const, addrVal),
+    EQVars(const,condVar,res),
+    
+    
+    DataFlows(res, resFrom),
+    
+    // Invalid opcode
+    Statement_Opcode(invalidStmt,"INVALID"),
+    Statement_Block(jumpiStmt,assertBlock),
+    Statement_Block(invalidStmt,assertBlock),
+    JUMPI(jumpiStmt,_,resFrom).
+
+.decl test(const:Variable, addrVal:Value,condVar:Variable)
+.output test
+test(const, addrVal,condVar) :-
+    Variable_Value(const, addrVal),
+    EQVars(const,condVar,res),
+    
+    DataFlows(res, resFrom),
+    JUMPI(_,_,resFrom).
+
+
+.decl test1(condVar:Variable)
+.output test1
+test1(condVar) :-
+    (CallAddressFromStorage(_,_,callStmt);CALL(callStmt, _, _, _, _, _, _, _, _)),
+    
+    Statement_Block(callStmt, callBlock),
+    InFunction(callBlock,fun),
+    CallResult(callRes, callStmt),
+    DataFlows(callRes, condVar).

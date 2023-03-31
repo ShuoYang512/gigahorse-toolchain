@@ -1,0 +1,123 @@
+#include "../clientlib/decompiler_imports.dl"
+#include "../clientlib/loops_semantics.dl"
+#include "../clientlib/guards.dl"
+#include "../clientlib/vulnerability_macros.dl"
+
+.decl PubFunArg(pubFunSign:symbol, argIndex:number, arg: Variable)
+.output PubFunArg
+PubFunArg(pubFunSign, argIndex, arg) :-
+    PublicFunctionSelector(pubFun, pubFunSign),
+    PublicFunctionArg(pubFun, arg, argIndex).
+
+.decl InPublicFunction(stmt:Statement, funSign:symbol)
+.output InPublicFunction
+InPublicFunction(stmt, funSign) :-
+    PublicFunctionSelector(fun, funSign),
+    Statement_Block(stmt, block),
+    InFunction(block, fun).
+
+.decl CallAddressFromPubFunArg(pubFunSign:symbol,argIndex:number)
+.output CallAddressFromPubFunArg
+CallAddressFromPubFunArg(pubFunSign,argIndex) :-
+    PubFunArg(pubFunSign, argIndex, arg),
+    CALL(callStmt, _, target, _, _, _, _, _, _).
+
+.decl CallAddressFromPubFunArg1(pubFunSign:symbol,argIndex:number,vars:Variable)
+.output CallAddressFromPubFunArg1
+CallAddressFromPubFunArg1(pubFunSign,argIndex, vars) :-
+    PubFunArg(pubFunSign, argIndex, arg),
+    DataFlows(arg, target),
+    CALL(callStmt, _, target, _, _, _, _, _, _),
+    Statement_Defines(callStmt, vars,_).
+
+.decl CallAddressFromPubFunArg2(pubFunSign:symbol,target:Variable,revertStmt:Statement,kind:symbol)
+.output CallAddressFromPubFunArg2
+CallAddressFromPubFunArg2(pubFunSign,target,revertStmt,kind) :-
+    // PubFunArg(pubFunSign, argIndex, arg),
+    // DataFlows(arg, addrVar),
+    // AddressTypedVar(addrVar),
+    InPublicFunction(callStmt,pubFunSign),
+    // REVERT
+    InPublicFunction(revertStmt, pubFunSign),
+    REVERT(revertStmt, _, _),
+    StatementUsesMemoryReadsFromZero(revertStmt,kind),
+
+    CALL(callStmt, _, target, _, _, _, _, _, _).
+
+
+.decl CallAddressFromPubFunArg3(pubFunSign:symbol,resVar:Variable,revertStmt:Statement, callStmt:Statement)
+.output CallAddressFromPubFunArg3
+CallAddressFromPubFunArg3(pubFunSign,resVar,revertStmt,callStmt) :-
+    // PubFunArg(pubFunSign, argIndex, arg),
+    // DataFlows(arg, addrVar),
+    // AddressTypedVar(addrVar),
+    InPublicFunction(callStmt,pubFunSign),
+    // REVERT
+    InPublicFunction(revertStmt, pubFunSign),
+    REVERT(revertStmt, _, _),
+    Statement_Block(revertStmt, block), 
+    ControlsWith(_, block, condVar),
+    DataFlows(resVar, condVar),
+    CallResult(resVar, callStmt).
+
+.decl CallAddressFromPubFunArg4(pubFunSign:symbol,resVar:Variable,block:Block, callStmt:Statement,val:Value)
+.output CallAddressFromPubFunArg4
+CallAddressFromPubFunArg4(pubFunSign,resVar,block,callStmt,val) :-
+    // PubFunArg(pubFunSign, argIndex, arg),
+    // DataFlows(arg, addrVar),
+    // AddressTypedVar(addrVar),
+    InPublicFunction(callStmt,pubFunSign),
+    // REVERT
+    ThrowBlock(block),
+    Variable_Value(condVar, val),
+    
+    
+    ControlsWith(_, block, condVar),
+    DataFlows(resVar, condVar),
+    CallResult(resVar, callStmt).
+
+.decl CallAddressFromPubFunArg5(pubFunSign:symbol,val:Value)
+.output CallAddressFromPubFunArg5
+CallAddressFromPubFunArg5(pubFunSign,val) :-
+    // PubFunArg(pubFunSign, argIndex, arg),
+    // DataFlows(arg, addrVar),
+    // AddressTypedVar(addrVar),
+    InPublicFunction(callStmt,pubFunSign),
+    // REVERT
+    // TODO condition flows to the revert block
+    REVERTControledWith(pubFunSign, _, val),
+    ControlsWith(_, _, condVar),
+    DataFlows(resVar, condVar),
+    CallResult(resVar, callStmt).
+
+
+.decl REVERTControledWith(pubFunSign:symbol,block:Block, val:Value)
+.output REVERTControledWith
+REVERTControledWith(pubFunSign,block,val) :-
+    // PubFunArg(pubFunSign, argIndex, arg),
+    // DataFlows(arg, addrVar),
+    // AddressTypedVar(addrVar),
+    InFunction(block,fun),
+    PublicFunctionSelector(fun, pubFunSign),
+    
+    // REVERT
+    ThrowBlock(block),
+    
+    Variable_Value(condVar, val),
+    
+
+    ControlsWith(_, block, condVar).
+
+.decl CallAddressFromPubFunArg6(pubFunSign:symbol,callStmt:Statement)
+.output CallAddressFromPubFunArg6
+CallAddressFromPubFunArg6(pubFunSign,callStmt) :-
+    // PubFunArg(pubFunSign, argIndex, arg),
+    // DataFlows(arg, addrVar),
+    // AddressTypedVar(addrVar),
+    InPublicFunction(callStmt,pubFunSign),
+    // REVERT
+    // TODO condition flows to the revert block
+    REVERTControledWith(pubFunSign, _, "0x0"),
+    ControlsWith(_, _, condVar),
+    DataFlows(resVar, condVar),
+    CallResult(resVar, callStmt).

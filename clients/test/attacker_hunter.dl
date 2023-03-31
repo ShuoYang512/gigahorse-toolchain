@@ -1,0 +1,109 @@
+#include "../clientlib/decompiler_imports.dl"
+#include "../clientlib/loops_semantics.dl"
+#include "../clientlib/guards.dl"
+#include "../clientlib/vulnerability_macros.dl"
+
+.decl InPublicFunction(stmt:Statement, funSign:symbol)
+.output InPublicFunction
+InPublicFunction(stmt, funSign) :-
+    PublicFunctionSelector(fun, funSign),
+    Statement_Block(stmt, block),
+    InFunction(block, fun).
+
+.decl PubFunArg(pubFunSign:symbol, argIndex:number, arg: Variable)
+.output PubFunArg
+PubFunArg(pubFunSign, argIndex, arg) :-
+    PublicFunctionSelector(pubFun, pubFunSign),
+    PublicFunctionArg(pubFun, arg, argIndex).
+
+.decl EnvOp(stmt:Statement, to:Variable)
+EnvOp(stmt, to) :-
+    TIMESTAMP(stmt, to);NUMBER(stmt, to);DIFFICULTY(stmt, to);COINBASE(stmt, to);GASLIMIT(stmt, to).
+
+
+.decl ArgDepLoop()
+// .output ArgDepLoop
+
+
+.decl MultiCreate(pubFunSign:symbol, argIndex:number, stmt: Statement, condVar:Variable, addr: Variable)
+.output MultiCreate
+MultiCreate(pubFunSign, argIndex, stmt, condVar, addr) :-
+    // extract function stmts and arg index and arg
+    InPublicFunction(stmt, pubFunSign),
+    PubFunArg(pubFunSign, argIndex, arg),
+
+    // stmt is in the loop (while, for loop)
+    StatementInStructuredLoop(stmt, loop),
+    
+    // create stmt and the defined var: addr
+    Statement_Opcode(stmt, "CREATE"),
+    Statement_Defines(stmt, addr, _),
+    
+    // store created contract address to the storage
+    DataFlows(addr, key),
+    MapKeyToStorageIndex(key, _),
+    // the exit condition of the loop (e.g., a < 1)
+    DataFlows(arg, condVar),
+    
+    LoopExitCond(condVar, loop).
+
+.decl CreateContract(loop:Block, addr: Variable, useStmt: Statement)
+.output CreateContract
+CreateContract(loop, addr, useStmt) :-
+    StatementInStructuredLoop(stmt, loop),
+    Statement_Opcode(stmt, "CREATE"),
+    Statement_Defines(stmt, addr, _),
+    Statement_Uses(useStmt, addr, _).
+
+.decl CreateContractTest(loop:Block, addr: Variable, useStmt: Statement, index:Variable)
+.output CreateContractTest
+CreateContractTest(loop, addr, useStmt, index) :-
+    StatementInStructuredLoop(stmt, loop),
+    Statement_Opcode(stmt, "CREATE"),
+    Statement_Defines(stmt, addr, _),
+    Statement_Uses(useStmt, addr, _),
+    DataFlows(addr, index),
+    SSTORE(storeStmt, index, _).
+
+// 1. CREATE in Loop
+// 2. Loop times depends on external variable
+// 3. Storage variable length ++
+.decl InductionVariableInitialisedFromStorage(v:Variable, loop: Block, loadStmt: Statement)
+// An induction variable (v for loop) that is initialised through the result of
+// loading something from storage.
+.output InductionVariableInitialisedFromStorage
+InductionVariableInitialisedFromStorage(v, loop, loadStmt) :-
+  SLOAD(loadStmt, _, resVar),
+  DataFlows(resVar, v),
+  InductionVariable(v, loop).
+
+// store the addess in the array
+.decl IncreasedStorageOn(sstoreStmt: Statement, arrayId: Value)
+// When this public function is called, some array symbolized by arrayId is increased in size
+        
+IncreasedStorageOn(sstoreStmt, arrayId) :-
+   PossibleArraySizeVariable(sizeVar, arrayId),
+   AddResult(sizeVar, newSizeVar),
+   ADD(addStmt, _, _, newSizeVar),
+   StatementInAccessibleFunction(addStmt, f),
+   SSTORE(sstoreStmt, index, newSizeVar),
+   // not sure about the following, what if function calls private function?
+   StatementInAccessibleFunction(sstoreStmt, f), 
+   Variable_Value(index, arrayId).
+
+
+.decl ExternalControlledCreation(stor: Variable, loop: Block)
+.output ExternalControlledCreation
+ExternalControlledCreation(stor, loop) :-
+    // stmt is in the loop (while, for loop)
+    StatementInStructuredLoop(stmt, loop),
+    
+    // create stmt and the defined var: addr
+    Statement_Opcode(stmt, "CREATE"),
+    Statement_Defines(stmt, addr, _),
+
+    DataFlows(addr, stateVar),
+    SSTORE(storeStmt, _, stateVar).
+
+// 1. balance check to selfdestruct in constructor (creation tx)
+// 2. for loop to call a fixed contract address 

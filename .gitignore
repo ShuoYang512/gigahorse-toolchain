@@ -59,3 +59,8 @@ results.json
 
 # sqlite databases
 *.sqlite
+
+contracts
+test_contracts
+res
+*.out
