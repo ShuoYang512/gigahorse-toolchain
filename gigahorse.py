@@ -53,7 +53,8 @@ DEFAULT_INLINER_ROUNDS = 6
 
 DEFAULT_CACHE_DIR = join(GIGAHORSE_DIR, 'cache')
 
-TEMP_WORKING_DIR = ".temp"
+TEMP_WORKING_DIR = "/pro/yangshuo/output/.temp"
+# TEMP_WORKING_DIR = ".temp"
 """Scratch working directory."""
 
 DEFAULT_TIMEOUT = 360
