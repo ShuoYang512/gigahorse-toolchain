@@ -24,9 +24,8 @@ Leslie_FunctionSelector(func, funcSign) :-
   HighLevelFunctionName(func, funcSign),
   funcSign = "__function_selector__".
 
-// tainted vars initialed by attacker
+// tainted vars initialed by attacker, not necessarily the public func arg
 .decl Leslie_TaintedVar(funcSign:symbol, var:Variable)
-.output Leslie_TaintedVar
 // 1. vars that flows to the prepared call args in the attack contract
 Leslie_TaintedVar(funcSign, var) :-
   (CALL(callStmt, _, _, _, _, _, _, _, _);STATICCALL(callStmt, _, _, _, _, _, _, _);DELEGATECALL(callStmt, _, _, _, _, _, _, _)),
@@ -43,28 +42,27 @@ EnvOp(stmt, to) :-
   TIMESTAMP(stmt, to);NUMBER(stmt, to);DIFFICULTY(stmt, to);COINBASE(stmt, to).
 
 // 2. tainted by envs
-Leslie_TaintedVar(funcSign, var) :-
-  EnvOp(stmt, to),
-  DataFlows(to, var),
-  Leslie_Statement_Function(stmt, func),
-  Leslie_FunctionSelector(func, funcSign).
+.decl Leslie_EnvVarFlowsToTaintedVar(funcSign:symbol, envVar:Variable, taintedVar:Variable)
+.output Leslie_EnvVarFlowsToTaintedVar
+Leslie_EnvVarFlowsToTaintedVar(funcSign, envVar, taintedVar) :-
+  EnvOp(_, envVar),
+  DataFlows(envVar, taintedVar),
+  Leslie_TaintedVar(funcSign, taintedVar).
 
 // sensitive vars
 // vars related to calling outside or critical semantic features
 // TODO add contraints to sensitive calls
-.decl Leslie_SensitiveVar(funcSign:symbol, var:Variable, callFuncSig: Variable)
+.decl Leslie_SensitiveVar(funcSign:symbol, var:Variable, callFuncSig: Value)
 .output Leslie_SensitiveVar
 
-// ! use a strict mode to check the callee of a call
-// type1: call outside address manipulated by func arg; caller; or tx.orign
-// Leslie_SensitiveVar(funcSign, var, callFuncSig) :-
-//   // can add sensitive call to hook function signature, e.g., tokenToSend()
-//   Leslie_ExternalCall_FuncSign_ConstType(_, callStmt, callFuncSig),
-//   StatementUsesMemory_ActualMemoryArg(callStmt, _, _, source),
-//   (PublicFunctionArg(_, var, _);CALLER(_, var);ORIGIN(_, var)),
-//   DataFlows(var, source),
-//   Leslie_Statement_Function(callStmt, func),
-//   Leslie_FunctionSelector(func, funcSign).
+// type1: callee
+// flow from funcArg/callret to Callee, considered as a tainted path
+Leslie_SensitiveVar(funcSign, calleeVar, callFuncSig) :-
+  StatementUsesMemory_ActualMemoryArg(callStmt, _, 0, callFuncSigVar),
+  Variable_Value(callFuncSigVar,callFuncSig),
+  Leslie_FunctionSelector(func, funcSign),
+  Leslie_Statement_Function(callStmt, func),
+  (CALL(callStmt, _, calleeVar, _, _, _, _, _, _);STATICCALL(callStmt, _, calleeVar, _, _, _, _, _);DELEGATECALL(callStmt, _, calleeVar, _, _, _, _, _)).
 
 // type2: call outside with sensitive var manipulated by a predicate var
 Leslie_SensitiveVar(funcSign,predicate,callFuncSig) :-
@@ -76,97 +74,70 @@ Leslie_SensitiveVar(funcSign,predicate,callFuncSig) :-
   Leslie_Statement_Function(callStmt, func),
   Leslie_FunctionSelector(func, funcSign).
 
-// type3: callee
-// flow from funcArg/callret to Callee, considered as a tainted path
+// type3: ether transfer
 Leslie_SensitiveVar(funcSign, calleeVar, callFuncSig) :-
-  StatementUsesMemory_ActualMemoryArg(callStmt, _, 0, callFuncSig),
+  !StatementUsesMemory_ActualMemoryArg(callStmt, _, _, _),
+  CALL(callStmt, _, calleeVar, _, _, _, _, _, _),
+  callFuncSig = "0x00000000",
   Leslie_FunctionSelector(func, funcSign),
-  Leslie_Statement_Function(callStmt, func),
-  // Leslie_ExternalCall_FuncSign_ConstType(_, callStmt, callFuncSig),
-  (CALL(callStmt, _, calleeVar, _, _, _, _, _, _);STATICCALL(callStmt, _, calleeVar, _, _, _, _, _);DELEGATECALL(callStmt, _, calleeVar, _, _, _, _, _)).
+  Leslie_Statement_Function(callStmt, func).
 
-// add ether transfer
-.decl Leslie_TransferEtherCallInfo(func:Function, callStmt:Statement, calleeVar:Variable, transferVal:Variable)
+.decl Leslie_TransferEtherCallInfo(func:Function, callStmt:Statement, calleeVar:Variable)
 .output Leslie_TransferEtherCallInfo
-Leslie_TransferEtherCallInfo(func, callStmt, calleeVar, transferVal) :-
+Leslie_TransferEtherCallInfo(func, callStmt, calleeVar) :-
   Leslie_FunctionSelector(func, _),
   Leslie_Statement_Function(callStmt, func),
   !StatementUsesMemory_ActualMemoryArg(callStmt, _, _, _),
-  CALL(callStmt, _, calleeVar, transferVal, _, _, _, _, _).
-
-// val for placeholder
-Leslie_SensitiveVar(funcSign, calleeVar, val) :-
-  !StatementUsesMemory_ActualMemoryArg(callStmt, _, _, _),
-  CALL(callStmt, _, calleeVar, val, _, _, _, _, _),
-  Leslie_FunctionSelector(func, funcSign),
-  Leslie_Statement_Function(callStmt, func).
-
-// calleeVar for placeholder
-Leslie_SensitiveVar(funcSign, val, calleeVar) :-
-  !StatementUsesMemory_ActualMemoryArg(callStmt, _, _, _),
-  CALL(callStmt, _, calleeVar, val, _, _, _, _, _),
-  Leslie_FunctionSelector(func, funcSign),
-  Leslie_Statement_Function(callStmt, func).
+  CALL(callStmt, _, calleeVar, _, _, _, _, _, _).
 
 // mark the external call in the hook/fallback function
 .decl Leslie_ExternalCallInHook(callStmt:Statement, funcSign:symbol)
 .output Leslie_ExternalCallInHook
 Leslie_ExternalCallInHook(callStmt, funcSign) :-
   ConstantPossibleSigHash(funcSign, _, sigText),
-  PublicFunctionSelector(func, funcSign),
-  Leslie_ExternalCallInfo(func,callStmt,_,_,_,_,_),
+  Leslie_FunctionSelector(func, funcSign),
+  Leslie_ExternalCallInfo(func,callStmt,_,_,_,_),
   (sigText = "tokensReceived(bytes4,bytes32,address,address,address,uint256,bytes,bytes)";
   sigText = "transferFrom(address,address,uint256)";
   sigText = "tokensToSend(address,address,address,uint256,bytes,bytes)";
   sigText = "onERC721Received(address,address,uint256,bytes)";
   sigText = "onERC1155Received(address,address,uint256,uint256,bytes)";
   sigText = "canImplementInterfaceForAddress(bytes32,address)";
-  sigText = "delegatedTransferERC20(address,address,uint256)").
+  sigText = "delegatedTransferERC20(address,address,uint256)";
+  sigText = "onTokenTransfer(address,uint256,bytes)";
+  sigText = "onFlashLoan(address,address,uint256,uint256,bytes)";
+  sigText = "uniswapV2Call(address,uint256,uint256,bytes)").
 
-Leslie_ExternalCallInHook(callStmt, funcSign) :-
+.decl Leslie_ExternalCallInFallback(callStmt:Statement, funcSign:symbol)
+.output Leslie_ExternalCallInFallback
+Leslie_ExternalCallInFallback(callStmt, funcSign) :-
   FallbackFunction(func),
-  Leslie_ExternalCallInfo(func,callStmt,_,_,_,_,_),
-  Leslie_FunctionSelector(func, funcSign).
-
-Leslie_ExternalCallInHook(callStmt, funcSign) :-
-  FallbackFunction(func),
-  !StatementUsesMemory_ActualMemoryArg(callStmt, _, _, _),
-  CALL(callStmt, _, _, _, _, _, _, _, _),
-  Leslie_Statement_Function(callStmt, func),
+  Leslie_ExternalCallInfo(func,callStmt,_,_,_,_),
   Leslie_FunctionSelector(func, funcSign).
   
 // semantic features after call outside in the attack contract context
 // in the constructor, balance check and selfdestruct
 .decl Leslie_SensitiveOpOfBadRandomnessAfterExternalCall(funcSign:symbol, callStmt:Statement, sensitiveVar:Variable, sourceOp:Opcode)
 .output Leslie_SensitiveOpOfBadRandomnessAfterExternalCall
-Leslie_SensitiveOpOfBadRandomnessAfterExternalCall(funcSign, callStmt, sensitiveVar,sourceOp) :-
+Leslie_SensitiveOpOfBadRandomnessAfterExternalCall(funcSign, callStmt, sensitiveVar, sourceOp) :-
   (CALL(callStmt, _, _, _, _, _, _, _, _);STATICCALL(callStmt, _, _, _, _, _, _, _);DELEGATECALL(callStmt, _, _, _, _, _, _, _)),
-  Leslie_SensitiveOpBR(funcSign, sensitiveVar,sourceOp),
+  Leslie_SensitiveOpBR(funcSign, sensitiveVar, sourceOp),
   Leslie_SelfdestructOp(funcSign, _, _),
   funcSign = "__function_selector__",
   Leslie_Statement_Function(callStmt, func),
   Leslie_FunctionSelector(func, funcSign).
 
-Leslie_SensitiveOpOfBadRandomnessAfterExternalCall(funcSign, callStmt, sensitiveVar,sourceOp) :-
+Leslie_SensitiveOpOfBadRandomnessAfterExternalCall(funcSign, callStmt, sensitiveVar, sourceOp) :-
   (CALL(callStmt, _, _, _, _, _, _, _, _);STATICCALL(callStmt, _, _, _, _, _, _, _);DELEGATECALL(callStmt, _, _, _, _, _, _, _)),
-  Leslie_SensitiveOpBR(funcSign, sensitiveVar,sourceOp),
+  Leslie_SensitiveOpBR(funcSign, sensitiveVar, sourceOp),
   Leslie_Statement_Function(callStmt, func),
   Leslie_FunctionSelector(func, funcSign),
+  // airdrop hunter that deploys multiple contracts
   Leslie_Op_CreateInLoop(_, _).
-
-// in the other function, balance check only (tobe checked)
-// ! too wide
-// Leslie_SensitiveOpOfBadRandomnessAfterExternalCall(funcSign, callStmt, sensitiveVar,sourceOp) :-
-//   (CALL(callStmt, _, _, _, _, _, _, _, _);STATICCALL(callStmt, _, _, _, _, _, _, _);DELEGATECALL(callStmt, _, _, _, _, _, _, _)),
-//   Leslie_SensitiveOpBR(funcSign, sensitiveVar,sourceOp),
-//   funcSign != "__function_selector__",
-//   Leslie_Statement_Function(callStmt, func),
-//   Leslie_FunctionSelector(func, funcSign).
 
 // sensitive operations related to bad randomness
 // balance check
 .decl Leslie_SensitiveOpBR(funcSign: symbol, source:Variable, sourceOp:Opcode)
-.output Leslie_SensitiveOpBR
 Leslie_SensitiveOpBR(funcSign, source,sourceOp) :-
   (CALLER(sourceStmt, tar);ADDRESS(sourceStmt, tar);ORIGIN(sourceStmt, tar)),
   Statement_Opcode(sourceStmt, sourceOp),
@@ -179,7 +150,6 @@ Leslie_SensitiveOpBR(funcSign, source,sourceOp) :-
 
 // selfdestruct in the constructor
 .decl Leslie_SelfdestructOp(funcSign: symbol, target:Variable, targetOp:Opcode)
-.output Leslie_SelfdestructOp
 Leslie_SelfdestructOp(funcSign, target, targetOp) :-
   (CALLER(sourceStmt, caller); ORIGIN(sourceStmt, caller)),
   Statement_Opcode(sourceStmt, targetOp),
@@ -194,6 +164,11 @@ Leslie_SelfdestructOp(funcSign, target, targetOp) :-
 .output Leslie_SensitiveOpOfDoSAfterExternalCall
 Leslie_SensitiveOpOfDoSAfterExternalCall(funcSign, callStmt, callRetVar, callRetIndex, target) :-
   ExternalCall_ActualReturn(callStmt, callRetVar, callRetIndex),
+  CallToSignature(callStmt, sigText),
+  (sigText = "getCurrentRoundInfo(uint256)";
+  sigText = "_getCurrentRoundInfo()";
+  sigText = "getCurrentRoundInfo()";
+  sigText = "getCurrentRoundInfo2()"),
   DataFlows(callRetVar, target),
   // consider the flow
   Leslie_AddressAssertionOp(funcSign, target),
@@ -201,12 +176,12 @@ Leslie_SensitiveOpOfDoSAfterExternalCall(funcSign, callStmt, callRetVar, callRet
   Leslie_FunctionSelector(func, funcSign).
 
 .decl Leslie_AddressAssertionOp(funcSign: symbol, addrRet:Variable)
-.output Leslie_AddressAssertionOp
 Leslie_AddressAssertionOp(funcSign, addrRet) :-
   (EQVars(target,addrRet,res);EQVars(addrRet,target,res)),
   // flow to the predicate (tobe used)
   DataFlows(res, predicate),
-  JUMPI(_,_,predicate),
+  JUMPI(stmt,_,predicate),
+  Leslie_Statement_Function(stmt, func),
   // should be the const or the argument
   Variable_Value(target, val),
   Value_Length(val, len),
@@ -214,7 +189,6 @@ Leslie_AddressAssertionOp(funcSign, addrRet) :-
   Leslie_FunctionSelector(func, funcSign).
 
 // !-------- mark some critical operations for further inspection
-
 .decl Leslie_Op_Selfdestruct(funcSign: symbol, target:Variable)
 .output Leslie_Op_Selfdestruct
 Leslie_Op_Selfdestruct(funcSign, target) :-
@@ -234,55 +208,13 @@ Leslie_Op_CreateInLoop(funcSign, stmt) :-
 .output Leslie_Op_SoleCreate
 Leslie_Op_SoleCreate(funcSign, stmt) :-
     Leslie_FunctionSelector(func, funcSign),
-    Statement_Function(stmt, func),
+    Leslie_Statement_Function(stmt, func),
     // stmt is not in the loop (while, for loop)
     !StatementInStructuredLoop(stmt, _),
     // create stmt
     (Statement_Opcode(stmt, "CREATE");Statement_Opcode(stmt, "CREATE2")).
 
 // !---------------------------------------------
-
-// tainted data flow into sink in the same contract
-// ! however, the attack contract itself cannot become the victim
-// .decl Leslie_TaintedVarToSensitiveVar(funcSign:symbol, taintedVar:Variable, sensitiveVar:Variable, callFuncSig:Value)
-// .output Leslie_TaintedVarToSensitiveVar
-// Leslie_TaintedVarToSensitiveVar(funcSign, var1, var2, callFuncSig) :-
-//   Leslie_TaintedVar(funcSign, var1),
-//   !SLOAD(_, _, var1),
-//   Leslie_SensitiveVar(funcSign, var2, callFuncSig),
-//   // TODO add sensitive call to replace the arbitrary call
-//   (CALL(callStmt, _, var2, _, _, _, _, _, _);STATICCALL(callStmt, _, var2, _, _, _, _, _);DELEGATECALL(callStmt, _, var2, _, _, _, _, _)),
-//   DataFlows(var1, var2),
-//   var1 != var2.
-
-// ! strange to be considered, removed first
-// slots of profitable state vars related to receiver address or transfer amount (ether only, token to be supported)
-// .decl Leslie_ProfitableVar(func:Function, callStmt:Statement, funcSign:symbol, slotNum:Value)
-// .output Leslie_ProfitableVar
-// Leslie_ProfitableVar(func,callStmt,funcSign,slotNum) :-
-//   CALL(callStmt, _, _, amount, _, _, _, _, _),
-//   SLOAD(stmt, slotNumVar, var),
-//   DataFlows(var, amount),
-//   Variable_Value(slotNumVar, slotNum),
-//   Leslie_Statement_Function(stmt, func),
-//   Leslie_FunctionSelector(func, funcSign).
-
-// Leslie_ProfitableVar(func,callStmt,funcSign,slotNum) :-
-//   CALL(callStmt, _, calleeVar, _, _, _, _, _, _),
-//   SLOAD(stmt, slotNumVar, var),
-//   Variable_Value(slotNumVar, slotNum),
-//   DataFlows(var, calleeVar),
-//   Leslie_Statement_Function(stmt, func),
-//   Leslie_FunctionSelector(func, funcSign).
-
-// // tainted: load slots of profitable state vars
-// Leslie_TaintedVar(funcSign, var) :-
-//   Leslie_ProfitableVar(_,_,_,slotNum),
-//   SLOAD(stmt, slotNumVar, var),
-//   Variable_Value(slotNumVar, slotNum),
-//   Leslie_Statement_Function(stmt, func),
-//   Leslie_FunctionSelector(func, funcSign).
-
 // tainted data flow into storage
 .decl Leslie_TaintedSlot(slotNum:Value)
 Leslie_TaintedSlot(slotNum) :-
@@ -299,7 +231,6 @@ Leslie_TaintedVar(funcSign, var) :-
   Leslie_FunctionSelector(func, funcSign).
 
 // !--------------------------
-
 // related to call
 // callArgIndex = 1 means the 2nd parameter
 // 0,1....
@@ -311,7 +242,7 @@ Leslie_TaintedCallArg(funcSign, callStmt, callArgIndex-1) :-
   callArgIndex != 0,
   Leslie_TaintedVar(_, var),
   DataFlows(var, callArg),
-  Statement_Function(callStmt, func),
+  Leslie_Statement_Function(callStmt, func),
   Leslie_FunctionSelector(func, funcSign).
 
 // tainted data flow into the func return value
@@ -330,44 +261,32 @@ Leslie_TaintedFuncRet(funcSign, retIndex, ret) :-
 .output Leslie_CallRetToSensitiveVar
 Leslie_CallRetToSensitiveVar(funcSign, callStmt, callRetVar, callRetIndex, sensitiveVar, callFuncSig) :-
   ExternalCall_ActualReturn(callStmt, callRetVar, callRetIndex),
-  Leslie_SensitiveVar(_, sensitiveVar, callFuncSigVar),
-  Variable_Value(callFuncSigVar,callFuncSig),
+  Leslie_SensitiveVar(_, sensitiveVar, callFuncSig),
   callFuncSig != "0x70a08231",
   DataFlows(callRetVar, sensitiveVar),
   Leslie_Statement_Function(callStmt, func),
   Leslie_FunctionSelector(func, funcSign).
 
 // one more sink rule: sensitive call to the funcArg
-.decl Leslie_FuncArgToSensitiveVar(funcSign:symbol, callStmt:Statement, callRetVar:Variable, callRetIndex:number, sensitiveVar:Variable, callFuncSig:Value)
+.decl Leslie_FuncArgToSensitiveVar(funcSign:symbol, callStmt:Statement, funcArg:Variable, funcArgIndex:number, sensitiveVar:Variable, callFuncSig:Value)
 .output Leslie_FuncArgToSensitiveVar
 Leslie_FuncArgToSensitiveVar(funcSign, callStmt, funcArg, funcArgIndex, calleeVar, callFuncSig) :-
   PublicFunctionArg(func, funcArg, funcArgIndex),
-  Leslie_SensitiveVar(_, calleeVar,callFuncSigVar),
-  Variable_Value(callFuncSigVar,callFuncSig),
+  Leslie_SensitiveVar(_, calleeVar,callFuncSig),
   callFuncSig != "0x70a08231",
   (CALL(callStmt, _, calleeVar, _, _, _, _, _, _);STATICCALL(callStmt, _, calleeVar, _, _, _, _, _);DELEGATECALL(callStmt, _, calleeVar, _, _, _, _, _)),
   DataFlows(funcArg, calleeVar),
   Leslie_Statement_Function(callStmt, func),
   Leslie_FunctionSelector(func, funcSign).
 
-// ? not suitable for flow analysis yet, no specific funcSign to focus on
-// Leslie_CallRetToSensitiveVar(funcSign, callStmt, callRetVar, callRetIndex, sensitiveVar) :-
-//   ExternalCall_ActualReturn(callStmt, callRetVar, callRetIndex),
-//   JUMPI(_, _, sensitiveVar),
-//   DataFlows(callRetVar, sensitiveVar),
-//   Leslie_Statement_Function(callStmt, func),
-//   Leslie_FunctionSelector(func, funcSign),
-//   funcSign = "".
-
 //!--------------------------
-
 // explicit spread from external call return value to func return 
 .decl Leslie_Spread_CallRetToFuncRet(callStmt:Statement, callRet:Variable, callRetIndex:number, funcSign:symbol, funcRetIndex:number, funcRet:Variable)
 .output Leslie_Spread_CallRetToFuncRet
 Leslie_Spread_CallRetToFuncRet(callStmt, callRet, callRetIndex, funcSign, funcRetIndex, funcRet) :-
   ExternalCall_ActualReturn(callStmt, callRet, callRetIndex),
   RETURN(returnStmt, _, _),
-  Statement_Function(returnStmt, func),
+  Leslie_Statement_Function(returnStmt, func),
   StatementUsesMemory_ActualMemoryArg(returnStmt, _, funcRetIndex, funcRet),
   DataFlows(callRet, funcRet),
   Leslie_FunctionSelector(func, funcSign).
@@ -409,22 +328,20 @@ Leslie_Spread_FuncArgToFuncRet(funcSign, funcArgIndex, funcArg, funcRetIndex, fu
   Leslie_FunctionSelector(func, funcSign),
   PublicFunctionArg(func, funcArg, funcArgIndex),
   RETURN(returnStmt, _, _),
-  Statement_Function(returnStmt, func),
+  Leslie_Statement_Function(returnStmt, func),
   StatementUsesMemory_ActualMemoryArg(returnStmt, _, funcRetIndex, funcRet),
   DataFlows(funcArg, funcRet).
 
 //!--------------------------
-
 // restore external call info
-.decl Leslie_ExternalCallInfo(func:Function, callStmt:Statement, callOp:Opcode, calleeVar:Variable, numArg:number, numRet:number, retStmt:Statement)
+.decl Leslie_ExternalCallInfo(func:Function, callStmt:Statement, callOp:Opcode, calleeVar:Variable, numArg:number, numRet:number)
 .output Leslie_ExternalCallInfo
-Leslie_ExternalCallInfo(func, callStmt, callOp, calleeVar, numArg, numRet, retStmt) :-
+Leslie_ExternalCallInfo(func, callStmt, callOp, calleeVar, numArg, numRet) :-
   Leslie_FunctionSelector(func, _),
   Leslie_Statement_Function(callStmt, func),
   (CALL(callStmt, _, calleeVar, _, _, _, _, _, _);STATICCALL(callStmt, _, calleeVar, _, _, _, _, _);DELEGATECALL(callStmt, _, calleeVar, _, _, _, _, _)),
   Statement_Opcode(callStmt, callOp),
   ExternalCall_NumOfArgs(callStmt, numArg),
-  Statement_Next(callStmt, retStmt),
   numRet = count: ExternalCall_ActualReturn(callStmt, _, _).
 
 // restore funcSign
@@ -432,19 +349,19 @@ Leslie_ExternalCallInfo(func, callStmt, callOp, calleeVar, numArg, numRet, retSt
 .decl Leslie_ExternalCall_FuncSign_ConstType(func:Function, callStmt:Statement, funcSign:Value)
 .output Leslie_ExternalCall_FuncSign_ConstType
 Leslie_ExternalCall_FuncSign_ConstType(func, callStmt, funcSign) :-
-  Leslie_ExternalCallInfo(func, callStmt, _, _, _, _, _),
+  Leslie_ExternalCallInfo(func, callStmt, _, _, _, _),
   Variable_Value(actual, funcSign),
   StatementUsesMemory_ActualMemoryArg(callStmt, _, 0, actual).
 
 .decl Leslie_ExternalCall_FuncSign_ProxyType(func:Function, callStmt:Statement)
 .output Leslie_ExternalCall_FuncSign_ProxyType
 Leslie_ExternalCall_FuncSign_ProxyType(func, callStmt) :-
-  Leslie_ExternalCallInfo(func, callStmt, _, _, _, _, _),
+  Leslie_ExternalCallInfo(func, callStmt, _, _, _, _),
   DELEGATECALL(callStmt, _, _, _, data_length, _, _, _),
   CALLDATASIZE(_, data_length).
 
 Leslie_ExternalCall_FuncSign_ProxyType(func, callStmt) :-
-  Leslie_ExternalCallInfo(func, callStmt, _, _, _, _, _),
+  Leslie_ExternalCallInfo(func, callStmt, _, _, _, _),
   DELEGATECALL(callStmt, _, _, _, data_length2, _, _, _),
   CALLDATASIZE(_, data_length1),
   DataFlows(data_length1, data_length2).
@@ -453,7 +370,7 @@ Leslie_ExternalCall_FuncSign_ProxyType(func, callStmt) :-
 .output Leslie_ExternalCall_FuncSign_Metrics
 Leslie_ExternalCall_FuncSign_Metrics(func, callNum, constTypeNum, proxyTypeNum) :-
   Leslie_FunctionSelector(func, _),
-  callNum = count:Leslie_ExternalCallInfo(func, _, _, _, _, _, _),
+  callNum = count:Leslie_ExternalCallInfo(func, _, _, _, _, _),
   constTypeNum = count:Leslie_ExternalCall_FuncSign_ConstType(func, _, _),
   proxyTypeNum = count:Leslie_ExternalCall_FuncSign_ProxyType(func, _).
 
@@ -462,13 +379,13 @@ Leslie_ExternalCall_FuncSign_Metrics(func, callNum, constTypeNum, proxyTypeNum) 
 .decl Leslie_ExternalCall_Callee_ConstType(func:Function, callStmt:Statement, callee:Value)
 .output Leslie_ExternalCall_Callee_ConstType
 Leslie_ExternalCall_Callee_ConstType(func, callStmt, callee) :-
-  Leslie_ExternalCallInfo(func, callStmt, _, calleeVar, _, _, _),
+  Leslie_ExternalCallInfo(func, callStmt, _, calleeVar, _, _),
   Variable_Value(calleeVar, callee).
 
 .decl Leslie_ExternalCall_Callee_StorageType(func:Function, callStmt:Statement, storageSlot:symbol, byteLow:number, byteHigh:number)
 .output Leslie_ExternalCall_Callee_StorageType
 Leslie_ExternalCall_Callee_StorageType(func, callStmt, storageSlot, byteLow, byteHigh) :-
-  Leslie_ExternalCallInfo(func, callStmt, _, calleeVar, _, _, _),
+  Leslie_ExternalCallInfo(func, callStmt, _, calleeVar, _, _),
   !Variable_Value(calleeVar, _),
   Leslie_StorageVariableAddrType(storVar, calleeVar),
   StorageVariableInfo(storVar, storageSlot, byteLow, byteHigh).
@@ -476,14 +393,14 @@ Leslie_ExternalCall_Callee_StorageType(func, callStmt, storageSlot, byteLow, byt
 .decl Leslie_ExternalCall_Callee_StorageType_ForProxy(func:Function, callStmt:Statement, storageSlot:symbol)
 .output Leslie_ExternalCall_Callee_StorageType_ForProxy
 Leslie_ExternalCall_Callee_StorageType_ForProxy(func, callStmt, storageSlot) :-
-  Leslie_ExternalCallInfo(func, callStmt, _, calleeVar, _, _,_),
+  Leslie_ExternalCallInfo(func, callStmt, _, calleeVar, _, _),
   DataFlows(var, calleeVar),
   SLOADOfConst(_, storageSlot, var).
 
 .decl Leslie_ExternalCall_Callee_FuncArgType(func:Function, callStmt:Statement, pubFun:Function, argIndex:number)
 .output Leslie_ExternalCall_Callee_FuncArgType
 Leslie_ExternalCall_Callee_FuncArgType(func, callStmt, pubFun, argIndex) :-
-  Leslie_ExternalCallInfo(func, callStmt, _, calleeVar, _, _, _),
+  Leslie_ExternalCallInfo(func, callStmt, _, calleeVar, _, _),
   !Variable_Value(calleeVar, _),
   PublicFunctionArg(pubFun, funcArg, argIndex),
   DataFlows(funcArg, calleeVar).
@@ -492,7 +409,7 @@ Leslie_ExternalCall_Callee_FuncArgType(func, callStmt, pubFun, argIndex) :-
 .output Leslie_ExternalCall_Callee_Metrics
 Leslie_ExternalCall_Callee_Metrics(pubFun, callNum, typeConst, typeStorage, typeStorageForProxy, typeFuncArg) :-
   Leslie_FunctionSelector(pubFun, _),
-  callNum = count: Leslie_ExternalCallInfo(pubFun, _, _, _, _, _, _),
+  callNum = count: Leslie_ExternalCallInfo(pubFun, _, _, _, _, _),
   typeConst = count: Leslie_ExternalCall_Callee_ConstType(pubFun, _, _),
   typeStorage = count: Leslie_ExternalCall_Callee_StorageType(pubFun, _, _, _, _),
   typeStorageForProxy = count: Leslie_ExternalCall_Callee_StorageType_ForProxy(pubFun, _, _),
@@ -501,13 +418,12 @@ Leslie_ExternalCall_Callee_Metrics(pubFun, callNum, typeConst, typeStorage, type
 .decl Leslie_ExternalCall_Known_Arg(func:Function, callStmt:Statement, argIndex:number, argVal:Value)
 .output Leslie_ExternalCall_Known_Arg
 Leslie_ExternalCall_Known_Arg(func, callStmt, argIndex-1, argVal) :-
-  Leslie_ExternalCallInfo(func, callStmt, _, _, _, _, _),
+  Leslie_ExternalCallInfo(func, callStmt, _, _, _, _),
   Variable_Value(arg, argVal),
   StatementUsesMemory_ActualMemoryArg(callStmt, _, argIndex, arg),
   argIndex != 0. 
 
 // !------Helper
-
 .decl Leslie_FunctionInfo(func:Function, funcSign:symbol, funcHighLevelName:symbol)
 .output Leslie_FunctionInfo
 Leslie_FunctionInfo(func, funcSign, funcHighLevelName) :-
