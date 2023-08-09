@@ -356,9 +356,11 @@ ValidGlobalTerminalBlock(block) :-
    Block_Tail(block, tail),
    (STOP(tail) ; RETURN(tail, _, _)).
 
-.decl GlobalEntryBlock(block: Block)
 
-GlobalEntryBlock("0x0").
+
+.decl GlobalEntryBlock(block: Block)
+.input GlobalEntryBlock(IO="file", filename="GlobalEntryBlock.csv", delimiter="\t")
+
 
 .decl FallbackFunction(func: Function)
 

@@ -31,6 +31,7 @@ PublicFunctionArg(pubFun, arg, (constNum - 4) / 32):-
   CALLDATALOADOfConstant(cdl, _, constNum),
   CALLDATALOAD(cdl, _, arg),
   Statement_Function(cdl, pubFun),
+  IsPublicFunction(pubFun),
   !CallDataLoadArrayLoadingPattern(cdl, _, _, _, _),
   (constNum - 4) % 32 = 0.
 
@@ -38,6 +39,7 @@ PublicFunctionArg(pubFun, arg, constNum):-
   CALLDATALOADOfConstant(cdl, _, constNum),
   CALLDATALOAD(cdl, _, arg),
   Statement_Function(cdl, pubFun),
+  IsPublicFunction(pubFun),
   !CallDataLoadArrayLoadingPattern(cdl, _, _, _, _),
   (constNum - 4) % 32 != 0.
 
@@ -47,11 +49,13 @@ PublicFunctionArg(pubFun, arrayArg, index):-
 PublicFunctionArrayArg(pubFun, as(arrayArg, ArrayVariable), (@hex_to_number(constHex) - 4) / 32):-
   IsArgCallDataArrayVar(arrayArg, constHex),
   Variable_Function(arrayArg, pubFun),
+  IsPublicFunction(pubFun),
   (@hex_to_number(constHex) - 4) % 32 = 0.
 
 PublicFunctionArrayArg(pubFun, as(arrayArg, ArrayVariable), @hex_to_number(constHex)):-
   IsArgCallDataArrayVar(arrayArg, constHex),
   Variable_Function(arrayArg, pubFun),
+  IsPublicFunction(pubFun),
   (@hex_to_number(constHex) - 4) % 32 != 0.
 
 // e.g., for a statement 
@@ -139,7 +143,8 @@ MemoryStatement_ActualArgNew(memConsStmt, [WrapInQuotes(type), WrapInQuotes(info
   StatementUsesMemoryMemoryArgument(memConsStmt, _, index, [type, info, [indexv, length]]).
 
 MemoryModelingTempStmt(mstore):-
-  StatementUsesMemoryWriteAtRelativeIndex(_, _, mstore, _).
+  StatementUsesMemoryWriteAtRelativeIndex(_, _, mstore, _),
+  MSTORE(mstore, _, _).
 
 
 /***
@@ -294,6 +299,7 @@ ABIEncodedArrayIncludesArrayAtConcreteIndex(abiArr, memConsStmt, indexVar, array
 
 MemoryModelingTempStmt(memWriteStmt):-
   ABIEncodedArrayWriteTo(memWriteStmt, _, _, _),
+  MSTORE(memWriteStmt, _, _),
   !ArrayStore(memWriteStmt, _, _),
   !ArrayStoreAtIndex(memWriteStmt, _, _, _).
 
@@ -606,3 +612,36 @@ StatementUsesMemory_ActualMemoryArg(callDataCopy, "CALLDATACOPY", 0, arrVarRep):
   CALLDATACOPY_AllCalldata(callDataCopy),
   CALLDATACOPY(callDataCopy, array, _, _),
   VarIsArray(array, arrVarRep).
+
+
+.decl CREATE2WithInitCode(create2: Statement, initCode: symbol)
+.output CREATE2WithInitCode
+
+CREATE2WithInitCode(create2, initCode):-
+  CREATE2(create2, _, _, _, _, _),
+  MemWriteToMemConsStmtResolved(codeCopy, create2, _, _, _),
+  ByteCodeHex(bytecode),
+  Statement_Opcode(codeCopy, "CODECOPY"),
+  Statement_Uses(codeCopy, codeIndexVar, 1),
+  Statement_Uses(codeCopy, lenVar, 2),
+  Variable_Value(codeIndexVar, codeIndex),
+  Variable_Value(lenVar, len),
+  initCode = substr(bytecode, 2*@hex_to_number(codeIndex), 2*@hex_to_number(len)).
+
+// Fallback logic, less precise than the above, to handle code using create2 libraries
+// .decl CREATE2WithPossibleInitCode(create2: Statement, initCode: symbol)
+// .output CREATE2WithPossibleInitCode
+
+
+// CREATE2WithPossibleInitCode(create2, initCode):-
+//   CREATE2(create2, _, _, _, _, _),
+//   !CREATE2WithInitCode(create2, _),
+//   Statement_Opcode(codeCopy, "CODECOPY"),
+//   StatementDominates(codeCopy, create2),
+//   Statement_Uses(codeCopy, codeIndexVar, 1),
+//   Statement_Uses(codeCopy, lenVar, 2),
+//   Variable_Value(codeIndexVar, codeIndex),
+//   Variable_Value(lenVar, len),
+//   ByteCodeHex(bytecode),
+//   @hex_to_number(len) > 128, // maybe incomplete
+//   initCode = substr(bytecode, 2*@hex_to_number(codeIndex), 2*@hex_to_number(len)).
